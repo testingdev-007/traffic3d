@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🚦 TrafficLab — 3D Engine</title>
+  
+  <script src="./three.min.js"></script>
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;900&family=JetBrains+Mono:wght@800&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    html,body,#root{width:100%;height:100%;background:#000;font-family:'Nunito',sans-serif;overflow:hidden;}
+    #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; }
+    
+    input[type=range]{-webkit-appearance:none;height:6px;border-radius:3px;background:rgba(255,255,255,0.1);outline:none;cursor:pointer;width:100%;}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:currentColor;cursor:pointer;box-shadow:0 0 12px currentColor;}
+
+    .hud-badge {
+      position: absolute; top: 24px; left: 24px; z-index: 10;
+      background: rgba(10, 12, 16, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.05); border-radius: 12px;
+      padding: 16px 24px; color: #fff; box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+    }
+
+    .tactical-drawer {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 380px; z-index: 10;
+      background: rgba(10, 12, 16, 0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border-left: 1px solid rgba(255,255,255,0.05);
+      box-shadow: -15px 0 50px rgba(0,0,0,0.9);
+      display: flex; flex-direction: column; color: #fff;
+    }
+    .drawer-content { padding: 40px 32px; overflow-y: auto; height: 100%; display: flex; flex-direction: column; }
+    
+    .glass-btn {
+      padding: 14px 24px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #fff; font-weight: 800; font-size: 14px;
+      text-transform: uppercase; letter-spacing: 1px; transition: all 0.2s; width: 100%; cursor: pointer;
+    }
+    .glass-btn:hover { background: rgba(0, 212, 255, 0.15); border-color: #00d4ff; color: #00d4ff; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+
+// --- LOGICAL CONSTANTS ---
+const CW=1600, CH=1600, CX=CW/2, CY=CH/2, LANE=40;
+const IL=CX-LANE, IR=CX+LANE, IT=CY-LANE, IB=CY+LANE;
+const SBX=CX+LANE/2, NBX=CX-LANE/2, EBY=CY-LANE/2, WBY=CY+LANE/2; // LHT
+
+const CAR_COLORS=[0xcccccc, 0x111111, 0x2a3b4c, 0x8b0000, 0x1a252c, 0x5d4037, 0x0055ff, 0xffaa00];
+
+// --- LOGIC ENGINE ---
+function mkSim(){
+  return{
+    sequences:{ 
+      NS: [{phase:"GREEN", duration:28}, {phase:"AMBER", duration:4}, {phase:"RED", duration:35}, {phase:"RED_AMBER", duration:3}],
+      EW: [{phase:"RED", duration:35}, {phase:"RED_AMBER", duration:3}, {phase:"GREEN", duration:28}, {phase:"AMBER", duration:4}]
+    },
+    lights:{NS:{phase:"GREEN", timer:28, idx:0}, EW:{phase:"RED", timer:35, idx:0}},
+    vehicles:[], spawn:{ns:0.5, ew:1.0}, stats:{score:1000, totalWait:0}, time:0, frame:0,
+  };
+}
+
+function spawnVeh(sim, d){
+  const ms = 70 + Math.random()*20;
+  const turnR = Math.random(); const turn = turnR > 0.75 ? "L" : turnR > 0.5 ? "R" : "S";
+  const col = CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)];
+  const v = { id:Math.random().toString(), col, len:30, wid:14, maxSpd:ms, spd:ms*.5, d, turn, wait:0 };
+  
+  if(d==="S"){v.x=SBX;v.y=-v.len;} else if(d==="N"){v.x=NBX;v.y=CH+v.len;} else if(d==="E"){v.y=EBY;v.x=-v.len;} else {v.y=WBY;v.x=CW+v.len;}
+  if(!sim.vehicles.some(u => u.d===d && Math.hypot(u.x-v.x, u.y-v.y) < 80)) sim.vehicles.push(v);
+}
+
+function tickVehs(sim, dt) {
+  sim.spawn.ns-=dt; sim.spawn.ew-=dt;
+  if(sim.spawn.ns<=0){ sim.spawn.ns=1.0; spawnVeh(sim, Math.random()<.5?"S":"N"); }
+  if(sim.spawn.ew<=0){ sim.spawn.ew=1.2; spawnVeh(sim, Math.random()<.5?"E":"W"); }
+  
+  const byD={N:[],S:[],E:[],W:[]}; sim.vehicles.forEach(v=>byD[v.d].push(v));
+  byD.S.sort((a,b)=>b.y-a.y); byD.N.sort((a,b)=>a.y-b.y); byD.E.sort((a,b)=>b.x-a.x); byD.W.sort((a,b)=>a.x-b.x);
+  
+  let currentWait = 0;
+
+  sim.vehicles.forEach(v => {
+    const isGreen = ["GREEN","AMBER"].includes(sim.lights[v.d==="N"||v.d==="S"?"NS":"EW"].phase);
+    const lane = byD[v.d], leader = lane[lane.indexOf(v)-1];
+    const fy=v.d==="S"?v.y+v.len/2:v.d==="N"?v.y-v.len/2:v.y, fx=v.d==="E"?v.x+v.len/2:v.d==="W"?v.x-v.len/2:v.x;
+    const dStop=v.d==="S"?IT-fy:v.d==="N"?fy-IB:v.d==="E"?IL-fx:fx-IR;
+    const inJunc=v.d==="S"?fy>IT:v.d==="N"?fy<IB:v.d==="E"?fx>IL:fx<IR, cleared=v.d==="S"?v.y-v.len/2>IB:v.d==="N"?v.y+v.len/2<IT:v.d==="E"?v.x-v.len/2>IR:v.x+v.len/2<IL;
+    
+    let target = v.maxSpd;
+    if(!isGreen && !inJunc && dStop>0 && dStop<90) target = dStop<15 ? 0 : v.maxSpd*(dStop/90);
+    
+    // Simplistic turning for 3D visual flow
+    if(inJunc && !cleared && v.turn !== "S") {
+        target = v.maxSpd * 0.4; 
+        if(v.turn === "R") { 
+            const centerDist = Math.hypot(v.x-CX, v.y-CY);
+            if(centerDist < 30) {
+                const oppDir = v.d==="S"?"N":v.d==="N"?"S":v.d==="E"?"W":"E";
+                const oncoming = sim.vehicles.some(o => o.d===oppDir && (o.turn==="S" || o.turn==="L") && (o.d==="S"?o.y+o.len/2>IT:o.d==="N"?o.y-o.len/2<IB:o.d==="E"?o.x+o.len/2>IL:o.x-o.len/2<IR));
+                if(oncoming) target = 0;
+                else { v.d = v.d==="S"?"W":v.d==="N"?"E":v.d==="E"?"S":"N"; v.turn = "S"; v.x = v.d==="N"||v.d==="S"? (v.d==="N"?NBX:SBX) : v.x; v.y = v.d==="E"||v.d==="W"? (v.d==="E"?EBY:WBY) : v.y; }
+            }
+        } else if (v.turn === "L") { 
+            v.d = v.d==="S"?"E":v.d==="N"?"W":v.d==="E"?"N":"S"; v.turn = "S"; v.x = v.d==="N"||v.d==="S"? (v.d==="N"?NBX:SBX) : v.x; v.y = v.d==="E"||v.d==="W"? (v.d==="E"?EBY:WBY) : v.y;
+        }
+    }
+
+    if(leader){
+      const ld = v.d==="S"?leader.y-leader.len/2-fy:v.d==="N"?fy-(leader.y+leader.len/2):v.d==="E"?leader.x-leader.len/2-fx:fx-(leader.x+leader.len/2);
+      if(ld<100) target = Math.min(target, ld<25 ? 0 : v.maxSpd*(ld/100));
+    }
+
+    v.spd += (target > v.spd ? 40 : -120) * dt;
+    v.spd = Math.max(0, Math.min(v.spd, v.maxSpd));
+    if(v.d==="S")v.y+=v.spd*dt; else if(v.d==="N")v.y-=v.spd*dt; else if(v.d==="E")v.x+=v.spd*dt; else v.x-=v.spd*dt;
+    
+    if(v.spd < 5 && !inJunc) currentWait++;
+  });
+  
+  sim.vehicles = sim.vehicles.filter(v => v.x>-200 && v.x<CW+200 && v.y>-200 && v.y<CH+200);
+  sim.stats.score = Math.max(0, 1000 - Math.floor(currentWait * 10));
+}
+
+// --- THREE.JS WRAPPER COMPONENT ---
+function ThreeScene({ simData }) {
+  const mountRef = useRef(null);
+  const engineRef = useRef({});
+
+  // 1. Initialize Three.js
+  useEffect(() => {
+    if(!window.THREE) return;
+    
+    const w = window.innerWidth, h = window.innerHeight;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0c10);
+    scene.fog = new THREE.Fog(0x0a0c10, 400, 1200);
+
+    const camera = new THREE.PerspectiveCamera(45, w/h, 1, 2000);
+    camera.position.set(200, 600, 400); // Isometric/Drone angle
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(w, h);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    mountRef.current.appendChild(renderer.domElement);
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+
+    const sun = new THREE.DirectionalLight(0xfffaee, 1.5);
+    sun.position.set(300, 500, -200);
+    sun.castShadow = true;
+    sun.shadow.camera.left = -500; sun.shadow.camera.right = 500;
+    sun.shadow.camera.top = 500; sun.shadow.camera.bottom = -500;
+    sun.shadow.mapSize.width = 2048; sun.shadow.mapSize.height = 2048;
+    scene.add(sun);
+
+    // Environment
+    const buildEnv = () => {
+      // Ground
+      const planeGeo = new THREE.PlaneGeometry(3000, 3000);
+      const planeMat = new THREE.MeshStandardMaterial({ color: 0x111214, roughness: 0.9, metalness: 0.1 });
+      const plane = new THREE.Mesh(planeGeo, planeMat);
+      plane.rotation.x = -Math.PI / 2;
+      plane.receiveShadow = true;
+      scene.add(plane);
+
+      // Roads
+      const roadMat = new THREE.MeshStandardMaterial({ color: 0x1c1e22, roughness: 0.8 });
+      const nsRoad = new THREE.Mesh(new THREE.PlaneGeometry(LANE*2, 3000), roadMat);
+      nsRoad.rotation.x = -Math.PI / 2; nsRoad.position.y = 0.5; nsRoad.receiveShadow = true;
+      scene.add(nsRoad);
+      const ewRoad = new THREE.Mesh(new THREE.PlaneGeometry(3000, LANE*2), roadMat);
+      ewRoad.rotation.x = -Math.PI / 2; ewRoad.position.y = 0.6; ewRoad.receiveShadow = true;
+      scene.add(ewRoad);
+
+      // Buildings
+      const bMat = new THREE.MeshStandardMaterial({ color: 0x0f1115, roughness: 0.7 });
+      const bGeo = new THREE.BoxGeometry(400, 200, 400);
+      const positions = [[-300, -300], [300, -300], [-300, 300], [300, 300]];
+      positions.forEach(([x, z]) => {
+        const b = new THREE.Mesh(bGeo, bMat);
+        b.position.set(x, 100, z);
+        b.castShadow = true; b.receiveShadow = true;
+        scene.add(b);
+      });
+    };
+    buildEnv();
+
+    // Store refs
+    engineRef.current = { scene, camera, renderer, carMeshes: {}, lightMeshes: {} };
+
+    // Traffic Lights setup
+    const createTL = (x, z) => {
+      const g = new THREE.BoxGeometry(4, 12, 4);
+      const m = new THREE.MeshStandardMaterial({ color: 0x222222 });
+      const post = new THREE.Mesh(g, m);
+      post.position.set(x, 10, z);
+      
+      const bulbG = new THREE.SphereGeometry(3, 8, 8);
+      const bulbM = new THREE.MeshStandardMaterial({ emissive: 0xff0000, emissiveIntensity: 2, color: 0x000000 });
+      const bulb = new THREE.Mesh(bulbG, bulbM);
+      bulb.position.y = 6;
+      post.add(bulb);
+      scene.add(post);
+      return bulbM; // We will update this material's color
+    };
+    
+    engineRef.current.lightMeshes.NS1 = createTL(-LANE-10, -LANE-10);
+    engineRef.current.lightMeshes.NS2 = createTL(LANE+10, LANE+10);
+    engineRef.current.lightMeshes.EW1 = createTL(LANE+10, -LANE-10);
+    engineRef.current.lightMeshes.EW2 = createTL(-LANE-10, LANE+10);
+
+    const handleResize = () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      mountRef.current?.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  // 2. Sync Logic State to 3D Scene
+  useEffect(() => {
+    if(!engineRef.current.scene) return;
+    const { scene, renderer, camera, carMeshes, lightMeshes } = engineRef.current;
+    
+    // Update Traffic Lights
+    const setLightColor = (mat, phase) => {
+      const c = phase==="GREEN" ? 0x00ff00 : phase==="RED" ? 0xff0000 : 0xffaa00;
+      mat.emissive.setHex(c);
+    };
+    setLightColor(lightMeshes.NS1, simData.lights.NS.phase);
+    setLightColor(lightMeshes.NS2, simData.lights.NS.phase);
+    setLightColor(lightMeshes.EW1, simData.lights.EW.phase);
+    setLightColor(lightMeshes.EW2, simData.lights.EW.phase);
+
+    // Sync Vehicles
+    const currentIds = new Set();
+    
+    simData.vehicles.forEach(v => {
+      currentIds.add(v.id);
+      if(!carMeshes[v.id]) {
+        // Build new car
+        const chassisG = new THREE.BoxGeometry(v.wid, 10, v.len);
+        const chassisM = new THREE.MeshPhysicalMaterial({ color: v.col, metalness: 0.5, roughness: 0.2, clearcoat: 1.0 });
+        const car = new THREE.Mesh(chassisG, chassisM);
+        car.castShadow = true; car.receiveShadow = true;
+        
+        // Cabin
+        const cabinG = new THREE.BoxGeometry(v.wid-2, 6, v.len*0.6);
+        const cabinM = new THREE.MeshPhysicalMaterial({ color: 0x111111, roughness: 0.1, transmission: 0.9 });
+        const cabin = new THREE.Mesh(cabinG, cabinM);
+        cabin.position.y = 8;
+        car.add(cabin);
+        
+        scene.add(car);
+        carMeshes[v.id] = car;
+      }
+      
+      // Update position (Map logic coordinates to 3D center origin)
+      const mesh = carMeshes[v.id];
+      mesh.position.set(v.x - CX, 5, v.y - CY);
+      
+      // Update rotation
+      const rot = {S:0, N:Math.PI, E:-Math.PI/2, W:Math.PI/2}[v.d] || 0;
+      mesh.rotation.y = rot;
+    });
+
+    // Cleanup old cars
+    Object.keys(carMeshes).forEach(id => {
+      if(!currentIds.has(id)) {
+        scene.remove(carMeshes[id]);
+        carMeshes[id].geometry.dispose();
+        carMeshes[id].material.dispose();
+        delete carMeshes[id];
+      }
+    });
+
+    renderer.render(scene, camera);
+  }, [simData]);
+
+  return <div ref={mountRef} id="canvas-container" />;
+}
+
+// --- MAIN APP COMPONENT ---
+function App() {
+  const simRef = useRef(mkSim());
+  const [simData, setSimData] = useState(simRef.current);
+  
+  // Tactical State Settings
+  const [nsDur, setNsDur] = useState(28);
+  const [ewDur, setEwDur] = useState(35);
+
+  const applySequence = () => {
+    const s = simRef.current;
+    s.sequences.NS = [{phase:"GREEN", duration:nsDur}, {phase:"AMBER", duration:4}, {phase:"RED", duration:ewDur+7}, {phase:"RED_AMBER", duration:3}];
+    s.sequences.EW = [{phase:"RED", duration:nsDur+7}, {phase:"RED_AMBER", duration:3}, {phase:"GREEN", duration:ewDur}, {phase:"AMBER", duration:4}];
+    s.lights.NS = {phase:"GREEN", timer:nsDur, idx:0};
+    s.lights.EW = {phase:"RED", timer:nsDur+7, idx:0};
+  };
+
+  useEffect(() => {
+    let lastTs = performance.now();
+    const loop = (ts) => {
+      const dt = Math.min((ts-lastTs)/1000, 0.05); lastTs = ts;
+      const sim = simRef.current; sim.time+=dt; sim.frame++;
+      
+      ["NS","EW"].forEach(g=>{
+        const lt=sim.lights[g], seq=sim.sequences[g]; lt.timer-=dt;
+        if(lt.timer<=0){ lt.idx=(lt.idx+1)%seq.length; lt.phase=seq[lt.idx].phase; lt.timer=seq[lt.idx].duration; }
+      });
+
+      tickVehs(sim, dt);
+      
+      // Force React state update to sync with Three.js
+      setSimData({...sim});
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }, []);
+
+  if(!window.THREE) {
+    return <div style={{color:'white', padding:40, fontSize:20}}>Error: three.min.js not found locally. Please follow the folder structure instructions.</div>;
+  }
+
+  return (
+    <>
+      <ThreeScene simData={simData} />
+      
+      <div className="hud-badge">
+        <h1 style={{fontSize: 22, margin:0, textShadow:"0 0 10px rgba(255,255,255,0.3)"}}>TrafficLab 3D</h1>
+        <div style={{marginTop: 12, display:"flex", alignItems:"center", gap: 12}}>
+            <div style={{fontSize: 11, color: "#667", fontWeight: 900}}>SYS_SCORE</div>
+            <div style={{fontFamily: "'JetBrains Mono', monospace", fontSize: 28, fontWeight: 900, color: simData.stats.score > 800 ? "#0f4" : "#f44"}}>{simData.stats.score}</div>
+        </div>
+      </div>
+
+      <div className="tactical-drawer">
+        <div className="drawer-content">
+            <h2 style={{fontSize: 24, marginBottom: 8}}>Tactical Override</h2>
+            <p style={{color: "#88a", fontSize: 14, marginBottom: 40, lineHeight: 1.5}}>Adjust the 3D physics simulation variables in real-time.</p>
+            
+            <div style={{marginBottom: 30}}>
+                <div style={{display:"flex", justifyContent:"space-between", marginBottom: 12}}>
+                    <span style={{color: "#00d4ff", fontWeight: 800, letterSpacing: 1}}>↕️ NORTH-SOUTH</span>
+                    <span style={{fontFamily: "'JetBrains Mono', monospace", color: "#00d4ff", fontWeight: 800}}>{nsDur}s</span>
+                </div>
+                <input type="range" min="10" max="60" value={nsDur} onChange={e => setNsDur(+e.target.value)} style={{color: "#00d4ff"}}/>
+            </div>
+
+            <div style={{marginBottom: 50}}>
+                <div style={{display:"flex", justifyContent:"space-between", marginBottom: 12}}>
+                    <span style={{color: "#e879f9", fontWeight: 800, letterSpacing: 1}}>↔️ EAST-WEST</span>
+                    <span style={{fontFamily: "'JetBrains Mono', monospace", color: "#e879f9", fontWeight: 800}}>{ewDur}s</span>
+                </div>
+                <input type="range" min="10" max="60" value={ewDur} onChange={e => setEwDur(+e.target.value)} style={{color: "#e879f9"}}/>
+            </div>
+
+            <div style={{marginTop: "auto"}}>
+                <button className="glass-btn" onClick={applySequence}>Initialize Sequence</button>
+            </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
+
+
